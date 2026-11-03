@@ -1,0 +1,55 @@
+# Canonical Dependabot config for the PMG MCP / node-* fleet.
+#
+# Goal: keep PR volume manageable for a small team. Updates are GROUPED so a
+# repo gets a handful of PRs per week instead of one-per-package, and the
+# dependabot-janitor (daily) auto-merges the green grouped PRs. Only
+# PRODUCTION-dependency MAJOR bumps land as individual PRs for human review,
+# since those can carry behavioural breaking changes a green test suite misses.
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "deps"
+      prefix-development: "deps-dev"
+      include: "scope"
+    groups:
+      dev-dependencies:
+        dependency-type: "development"
+        update-types: ["major", "minor", "patch"]
+      production-minor-patch:
+        dependency-type: "production"
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "docker"
+      include: "scope"
+    groups:
+      docker:
+        patterns: ["*"]
