@@ -136,7 +136,7 @@ function resolveBindHost(s2sSecret: string, env: NodeJS.ProcessEnv = process.env
  * HTTP transport. A fresh Server (and Transport) per request keeps the HTTP
  * transport stateless so every client can initialize independently.
  */
-export function createFreshServer(): Server {
+export function createFreshServer(requestCreds?: PmgCredentials, gatewayMode = false): Server {
   const server = new Server(
     { name: "mcp-server-pmg", version: "0.1.0" },
     { capabilities: { tools: {} } },
@@ -153,7 +153,10 @@ export function createFreshServer(): Server {
     // Log the tool name only: arguments may contain personal data.
     logger.info("Tool call received", { tool: name });
     try {
-      const credentials = getCredentials();
+      // SECURITY-REVIEW: gateway mode uses ONLY the request's credentials; never env.
+      const credentials = gatewayMode
+        ? (requestCreds ?? { error: "Missing gateway credentials for this request." })
+        : (requestCreds ?? getCredentials());
       if ("error" in credentials) {
         return { content: [{ type: "text", text: `Error: ${credentials.error}` }], isError: true };
       }
@@ -170,16 +173,15 @@ export function createFreshServer(): Server {
 
 /**
  * Handle a single MCP HTTP request with a fresh, stateless Server + Transport.
- * When `creds` is supplied (gateway mode) the request is processed inside an
- * AsyncLocalStorage context so tool handlers pick up the per-request key
- * without cross-tenant leakage. Never rethrows.
+ * When `creds` is supplied (gateway mode) they are bound to this request's
+ * Server instance, so tool handlers use them without cross-tenant leakage. Never rethrows.
  */
 async function handleMcpRequest(
   req: IncomingMessage,
   res: ServerResponse,
   creds?: PmgCredentials,
 ): Promise<void> {
-  const server = createFreshServer();
+  const server = createFreshServer(creds, creds !== undefined);
   const transport = new StreamableHTTPServerTransport({ enableJsonResponse: true });
 
   res.on("close", () => {
@@ -189,11 +191,7 @@ async function handleMcpRequest(
 
   try {
     await server.connect(transport);
-    if (creds) {
-      await transport.handleRequest(req, res);
-    } else {
-      await transport.handleRequest(req, res);
-    }
+    await transport.handleRequest(req, res);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger.error("MCP request handling failed", { error: message });
@@ -264,7 +262,7 @@ export async function startHttpTransport(): Promise<HttpServer> {
 
       if (isGatewayMode) {
         // SECURITY-REVIEW: gateway credential path. Reject explicitly when missing; never fall through to env.
-        const credentials = getCredentials(undefined, (name) => headerValue(req.headers[name]));
+        const credentials = getCredentials(undefined, (name) => headerValue(req.headers[name.toLowerCase()]));
         if ("error" in credentials) {
           res.writeHead(401, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Missing credentials", message: credentials.error }));

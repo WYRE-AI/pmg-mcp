@@ -22,10 +22,16 @@ interface TicketResult {
   error?: string;
 }
 
-let ticketCache: Ticket | null = null;
+// Tickets are cached per (baseUrl, username, password) so one gateway user's
+// ticket is never used for another user.
+const ticketCache = new Map<string, Ticket>();
+
+function cacheKey(creds: PmgCredentials): string {
+  return JSON.stringify([creds.baseUrl, creds.username, creds.password]);
+}
 
 export function clearTicketCache(): void {
-  ticketCache = null;
+  ticketCache.clear();
 }
 
 export function resolveBaseUrl(raw?: string): string {
@@ -64,8 +70,8 @@ export function getCredentials(
 ): PmgCredentials | { error: string } {
   const baseUrl = getBaseUrl(env);
   if (getHeader) {
-    const username = (getHeader("X-PMG-Username") ?? "").trim();
-    const password = (getHeader("X-PMG-Password") ?? "").trim();
+    const username = (getHeader("x-pmg-username") ?? "").trim();
+    const password = (getHeader("x-pmg-password") ?? "").trim();
     if (!username || !password) {
       return { error: "Missing X-PMG-Username or X-PMG-Password header (gateway mode requires both)." };
     }
@@ -88,7 +94,8 @@ function errorResult(kind: NonNullable<ApiResult["error"]>["kind"], message: str
 }
 
 export async function getTicket(creds: PmgCredentials): Promise<TicketResult> {
-  const cached = ticketCache;
+  const key = cacheKey(creds);
+  const cached = ticketCache.get(key);
   if (cached && Date.now() < cached.expiresAt) {
     return { ok: true, ticket: cached };
   }
@@ -103,7 +110,7 @@ export async function getTicket(creds: PmgCredentials): Promise<TicketResult> {
   });
 
   if (response.status >= 400) {
-    ticketCache = null;
+    ticketCache.delete(key);
     const message = redactSecrets(`Unable to authenticate to PMG (status ${response.status}).`, [
       creds.username,
       creds.password,
@@ -118,7 +125,7 @@ export async function getTicket(creds: PmgCredentials): Promise<TicketResult> {
   const csrf = body.data?.CSRFPreventionToken;
   const username = body.data?.username;
   if (!ticket || !csrf) {
-    ticketCache = null;
+    ticketCache.delete(key);
     return { ok: false, error: "Invalid PMG ticket response." };
   }
 
@@ -128,7 +135,7 @@ export async function getTicket(creds: PmgCredentials): Promise<TicketResult> {
     username: username ?? creds.username,
     expiresAt: Date.now() + TICKET_TTL_MS,
   };
-  ticketCache = nextTicket;
+  ticketCache.set(key, nextTicket);
   return { ok: true, ticket: nextTicket };
 }
 
@@ -206,7 +213,7 @@ export async function execute(
     });
     if (response.status === 401 && !retryState.retried) {
       retryState.retried = true;
-      ticketCache = null;
+      ticketCache.delete(cacheKey(creds));
       return execute(endpoint, args, creds);
     }
     if (response.status >= 300 && response.status < 400) {

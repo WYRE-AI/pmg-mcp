@@ -1,0 +1,8 @@
+# Extend the default gitleaks rules. Test fixtures and the smoke script use
+# obviously fake credentials.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fake credentials used only in mocked tests and the offline smoke script"
+paths = ['''(src|dist)/__tests__/.*\.test\.(ts|js)''', '''scripts/smoke\.mjs''']
