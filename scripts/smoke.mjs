@@ -128,6 +128,22 @@ try {
   } finally {
     child.kill();
   }
+
+  console.log("\n[base-url] no default PMG_BASE_URL");
+  await withServer({ PMG_BASE_URL: "" }, async (client) => {
+    const result = await client.callTool({ name: "pmg_version_get", arguments: {} });
+    check(result.isError === true && textOf(result).includes("PMG_BASE_URL is required"), "stdio with PMG_BASE_URL unset starts and tools return is_error");
+  });
+  const httpExit = await new Promise((resolveExit) => {
+    const env = { ...process.env, MCP_TRANSPORT: "http", AUTH_MODE: "env", MCP_HTTP_PORT: "0", PORT: "0", LOG_LEVEL: "warn" };
+    delete env.PMG_BASE_URL;
+    const proc = spawn(process.execPath, [resolve(root, "dist/index.js")], { env, stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    proc.stderr.on("data", (chunk) => (stderr += chunk));
+    const timer = setTimeout(() => { proc.kill(); resolveExit({ code: "timeout", stderr }); }, 5000);
+    proc.on("exit", (code) => { clearTimeout(timer); resolveExit({ code, stderr }); });
+  });
+  check(httpExit.code === 1 && httpExit.stderr.includes("PMG_BASE_URL is required"), "http mode with PMG_BASE_URL unset exits at startup");
 } catch (error) {
   console.error("smoke test crashed:", error);
   failures.push("crash");

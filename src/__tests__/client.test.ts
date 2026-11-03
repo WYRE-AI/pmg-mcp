@@ -41,6 +41,19 @@ describe("PMG base URL safety", () => {
     expect(() => resolveBaseUrl(value)).toThrow(/PMG_BASE_URL/);
   });
 
+  it("has no default base URL: unset or blank PMG_BASE_URL throws", () => {
+    expect(() => resolveBaseUrl(undefined)).toThrow(/PMG_BASE_URL is required/);
+    expect(() => resolveBaseUrl("   ")).toThrow(/PMG_BASE_URL is required/);
+    expect(() => getBaseUrl({})).toThrow(/PMG_BASE_URL is required/);
+  });
+
+  it("getCredentials returns an error (never a default URL) when PMG_BASE_URL is unset", () => {
+    const env = getCredentials({ PMG_USERNAME: "u@pmg", PMG_PASSWORD: "fake-password" });
+    expect(env).toEqual({ error: expect.stringMatching(/PMG_BASE_URL is required/) });
+    const gw = getCredentials({}, (name) => ({ "x-pmg-username": "u@pmg", "x-pmg-password": "fake-password" })[name]);
+    expect(gw).toEqual({ error: expect.stringMatching(/PMG_BASE_URL is required/) });
+  });
+
   it("reads the configured base URL", () => {
     expect(getBaseUrl({ PMG_BASE_URL: "https://pmg.example.com:8006" })).toBe("https://pmg.example.com:8006");
   });

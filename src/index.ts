@@ -386,7 +386,12 @@ async function main() {
   const transportType = process.env.MCP_TRANSPORT || "stdio";
 
   // Fail fast on bad configuration (before accepting any request).
-  const baseUrl = getBaseUrl(); // throws if PMG_BASE_URL is invalid
+  // In stdio mode an UNSET PMG_BASE_URL is allowed so the server can start and every
+  // tool returns a clear is_error (the CI canary relies on this). A set-but-invalid
+  // value, and an unset value in http mode, still fail startup. There is no default URL.
+  const baseUrlUnsetInStdio = transportType !== "http" && !(process.env.PMG_BASE_URL ?? "").trim();
+  const baseUrl = baseUrlUnsetInStdio ? undefined : getBaseUrl();
+  if (baseUrlUnsetInStdio) logger.warn("PMG_BASE_URL is not set; tools will return an error until it is configured.");
   const tiers = [...getEnabledTiers()]; // throws on an unknown tier name
   logger.info("Starting PMG MCP server", {
     transport: transportType,

@@ -3,7 +3,6 @@ import { readFileSync } from "node:fs";
 import { Agent } from "undici";
 import type { ApiResult, EndpointSpec, PmgCredentials } from "./types.js";
 
-export const DEFAULT_BASE_URL = "https://pmg.example.com:8006";
 export const API_PREFIX = "/api2/json";
 export const TICKET_PATH = "/api2/json/access/ticket";
 export const TICKET_TTL_MS = 90 * 60 * 1000;
@@ -75,7 +74,7 @@ export function ticketCacheSize(): number {
 
 export function resolveBaseUrl(raw?: string): string {
   const value = (raw ?? "").trim();
-  if (!value) return DEFAULT_BASE_URL;
+  if (!value) throw new Error("PMG_BASE_URL is required (for example https://pmg.example.com:8006).");
   let url: URL;
   try {
     url = new URL(value);
@@ -107,7 +106,12 @@ export function getCredentials(
   env: NodeJS.ProcessEnv = process.env,
   getHeader?: (name: string) => string | undefined,
 ): PmgCredentials | { error: string } {
-  const baseUrl = getBaseUrl(env);
+  let baseUrl: string;
+  try {
+    baseUrl = getBaseUrl(env);
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
   if (getHeader) {
     const username = (getHeader("x-pmg-username") ?? "").trim();
     const password = (getHeader("x-pmg-password") ?? "").trim();

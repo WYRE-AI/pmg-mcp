@@ -18,7 +18,7 @@ jobs:
     uses: WYRE-AI/reusable-workflows/.github/workflows/mcp-server-release.yml@2b0b056bd7544937e5cbd56cf2e1ff8a180a411f
     with:
       server-name: pmg-mcp
-      image-name: ghcr.io/asachs01/pmg-mcp
+      image-name: ghcr.io/wyre-ai/pmg-mcp
     secrets: inherit
 
   # DEPLOY TEMPORARILY DISABLED.
@@ -39,8 +39,8 @@ jobs:
   #     contents: read
   #   uses: WYRE-AI/reusable-workflows/.github/workflows/mcp-server-deploy.yml@2b0b056bd7544937e5cbd56cf2e1ff8a180a411f
   #   with:
-  #     vendor-slug: driversnote
-  #     image-name: ghcr.io/wyre-ai/driversnote-mcp
+  #     vendor-slug: pmg
+  #     image-name: ghcr.io/wyre-ai/pmg-mcp
   #     digest: ${{ needs.release.outputs.digest }}
   #     version: ${{ needs.release.outputs.version }}
   #   secrets: inherit

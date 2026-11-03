@@ -26,6 +26,8 @@ AUTH_MODE=env
 MCP_TRANSPORT=stdio
 ```
 
+`PMG_BASE_URL` is required and has no default. In http mode the server exits at startup if it is unset; in stdio mode it starts and every tool returns an error until it is set.
+
 In gateway mode, credentials are supplied per request through `X-PMG-Username` and `X-PMG-Password`; environment credentials are not used.
 
 ### HTTP transport hardening

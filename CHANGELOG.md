@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Security (round-4 re-review)
+- PMG_BASE_URL has no default: http mode exits at startup when it is unset; stdio starts and every tool returns is_error.
+- Release image is published to ghcr.io/wyre-ai/pmg-mcp.
+- `.env.example` comments out MCP_ALLOWED_HOSTS.
+- gitleaks allowlist narrowed from whole test/smoke paths to the specific fake fixture values.
+
 ### Security
 - Gateway mode requires `CONDUIT_S2S_SECRET` >= 32 chars and rejects placeholders at startup.
 - `MCP_ALLOWED_HOSTS` Host-header check (DNS-rebinding protection) before `/mcp`; 1 MiB body limit (413).
