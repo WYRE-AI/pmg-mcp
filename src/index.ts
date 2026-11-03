@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Driversnote MCP Server
+ * Proxmox Mail Gateway MCP Server
  *
  * One MCP tool per operation of the Proxmox Mail Gateway API.
  * 55 read + 17 write + 16 admin = 88 tools. Tools are grouped by tier
@@ -53,7 +53,22 @@ const KNOWN_PLACEHOLDER_SECRETS = new Set([
   "example",
   "replace-me",
   "s2s-secret",
+  "your-s2s-secret-here",
+  "your-secret-here",
+  "replace-with-secret",
+  "password",
+  "test",
 ]);
+
+const PLACEHOLDER_PATTERNS = [/^x{3,}$/i, /^your[-_ ]/i, /^(change|replace)[-_ ]?(me|this|with)/i, /^<.*>$/, /^todo$/i];
+
+function isPlaceholderSecret(raw: string): boolean {
+  const v = raw.toLowerCase();
+  return KNOWN_PLACEHOLDER_SECRETS.has(v) || PLACEHOLDER_PATTERNS.some((re) => re.test(v));
+}
+
+const MIN_S2S_SECRET_LENGTH = 32;
+const MAX_BODY_BYTES = 1024 * 1024;
 
 const LOOPBACK_HOST = "127.0.0.1";
 
@@ -81,7 +96,7 @@ function headerValue(value: string | string[] | undefined): string | undefined {
 }
 
 /** 127.0.0.1, the rest of 127.0.0.0/8, localhost, and ::1. */
-function isLoopbackBindHost(host: string): boolean {
+export function isLoopbackBindHost(host: string): boolean {
   const normalized = host.trim().toLowerCase().replace(/^\[(.+)\]$/, "$1");
   if (normalized === "localhost" || normalized === "::1") return true;
   const bare = normalized.startsWith("::ffff:") ? normalized.slice("::ffff:".length) : normalized;
@@ -97,11 +112,16 @@ function isLoopbackBindHost(host: string): boolean {
  * flag may bypass, and that bypass does not check X-Gateway-S2S.
  * The secret value is never written to logs.
  */
-function resolveS2sSecret(env: NodeJS.ProcessEnv = process.env): { secret: string; insecureDev: boolean } {
+export function resolveS2sSecret(env: NodeJS.ProcessEnv = process.env): { secret: string; insecureDev: boolean } {
   // SECURITY-REVIEW: S2S secret resolution (fail closed; dev bypass only when the secret is empty).
   const raw = (env.CONDUIT_S2S_SECRET ?? "").trim();
-  if (raw && KNOWN_PLACEHOLDER_SECRETS.has(raw.toLowerCase())) {
+  if (raw && isPlaceholderSecret(raw)) {
     refuseStart(PLACEHOLDER_S2S_SECRET_ERROR);
+  }
+  if (raw && raw.length < MIN_S2S_SECRET_LENGTH) {
+    refuseStart(
+      `Refusing to start HTTP transport: CONDUIT_S2S_SECRET must be at least ${MIN_S2S_SECRET_LENGTH} characters (openssl rand -hex 32).`,
+    );
   }
   if (raw) return { secret: raw, insecureDev: false };
   if (env.MCP_ALLOW_INSECURE_DEV === "1") {
@@ -181,6 +201,42 @@ async function handleMcpRequest(
   res: ServerResponse,
   creds?: PmgCredentials,
 ): Promise<void> {
+  // Bound buffering before handing a parsed body to the SDK (including chunked uploads).
+  let parsedBody: unknown;
+  if (req.method === "POST") {
+    const limit = MAX_BODY_BYTES;
+    const tooLarge = () => {
+      if (res.headersSent) return;
+      res.writeHead(413, { "Content-Type": "application/json", Connection: "close" });
+      res.end(JSON.stringify({ error: "Request body exceeds 1 MiB" }));
+      req.resume();
+    };
+    if (Number(req.headers["content-length"]) > limit) {
+      tooLarge();
+      return;
+    }
+    try {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      // Early return must not destroy the socket before the 413 is flushed.
+      for await (const chunk of req.iterator({ destroyOnReturn: false })) {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        size += buffer.length;
+        if (size > limit) {
+          tooLarge();
+          return;
+        }
+        chunks.push(buffer);
+      }
+      parsedBody = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    } catch {
+      if (!res.headersSent) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Invalid JSON request body" }));
+      }
+      return;
+    }
+  }
   const server = createFreshServer(creds, creds !== undefined);
   const transport = new StreamableHTTPServerTransport({ enableJsonResponse: true });
 
@@ -191,7 +247,7 @@ async function handleMcpRequest(
 
   try {
     await server.connect(transport);
-    await transport.handleRequest(req, res);
+    await transport.handleRequest(req, res, parsedBody);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger.error("MCP request handling failed", { error: message });
@@ -206,7 +262,7 @@ async function startStdioTransport(): Promise<void> {
   const server = createFreshServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  logger.info("Driversnote MCP server running on stdio");
+  logger.info("PMG MCP server running on stdio");
 }
 
 /**
@@ -218,7 +274,11 @@ async function startStdioTransport(): Promise<void> {
  */
 export async function startHttpTransport(): Promise<HttpServer> {
   const { secret: s2sSecret, insecureDev } = resolveS2sSecret();
-  const port = parseInt(process.env.MCP_HTTP_PORT || "8080", 10);
+  const rawPort = process.env.MCP_HTTP_PORT ?? "8080";
+  if (!/^\d+$/.test(rawPort) || Number(rawPort) > 65535) {
+    refuseStart("Refusing to start HTTP transport: MCP_HTTP_PORT must be an integer between 0 and 65535.");
+  }
+  const port = Number(rawPort);
   const host = resolveBindHost(s2sSecret);
   if (insecureDev) {
     // error level so LOG_LEVEL=warn|error cannot hide the bypass.
@@ -237,8 +297,21 @@ export async function startHttpTransport(): Promise<HttpServer> {
     }
   }
 
+  // SECURITY-REVIEW: DNS-rebinding protection. Host is checked when MCP_ALLOWED_HOSTS is set,
+  // when there is no S2S secret, or when bound to loopback.
+  const checkHost = process.env.MCP_ALLOWED_HOSTS !== undefined || !s2sSecret || isLoopbackBindHost(host);
+  const configuredHosts = (process.env.MCP_ALLOWED_HOSTS ?? "").split(",").map((h) => h.trim()).filter(Boolean);
+  for (const entry of configuredHosts) {
+    if (entry.includes(":") && !/^\[[0-9a-f:]+\]$/i.test(entry)) {
+      logger.warn(`MCP_ALLOWED_HOSTS entry "${entry}" contains a port or unbracketed IPv6 address and will never match.`);
+    }
+  }
+  const allowedHosts = new Set([
+    "localhost", "127.0.0.1", "[::1]",
+    ...configuredHosts.map((h) => h.toLowerCase()),
+  ]);
   const httpServer = createHttpServer((req: IncomingMessage, res: ServerResponse) => {
-    const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+    const url = new URL(req.url || "/", "http://localhost");
 
     // Shallow, unauthenticated liveness probe. Must NOT read credentials or call upstream.
     if (url.pathname === "/health" || url.pathname === "/healthz") {
@@ -247,8 +320,17 @@ export async function startHttpTransport(): Promise<HttpServer> {
       return;
     }
 
+    // Match the entire Host authority, allowing only an optional numeric port.
+    const authority = req.headers.host?.toLowerCase();
+    const hostMatch = authority?.match(/^(\[[0-9a-f:]+\]|[a-z0-9.-]+)(?::([0-9]{1,5}))?$/);
+    if (checkHost && (!hostMatch || (hostMatch[2] !== undefined && (Number(hostMatch[2]) < 1 || Number(hostMatch[2]) > 65535)) || !allowedHosts.has(hostMatch[1]))) {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Host not allowed" }));
+      return;
+    }
+
     if (url.pathname === "/mcp") {
-      // SECURITY-REVIEW: X-Gateway-S2S check. Enforced before any Driversnote credential is read.
+      // SECURITY-REVIEW: X-Gateway-S2S check. Enforced before any PMG credential is read.
       // Empty s2sSecret is only reachable when MCP_ALLOW_INSECURE_DEV=1.
       if (s2sSecret && !verifyS2sHeader(headerValue(req.headers[S2S_HEADER]), s2sSecret)) {
         res.writeHead(401, { "Content-Type": "application/json" });
@@ -287,7 +369,7 @@ export async function startHttpTransport(): Promise<HttpServer> {
       httpServer.off("error", onError);
       const addr = httpServer.address();
       const actualPort = typeof addr === "object" && addr ? addr.port : port;
-      logger.info(`Driversnote MCP server listening on http://${host}:${actualPort}/mcp`);
+      logger.info(`PMG MCP server listening on http://${host}:${actualPort}/mcp`);
       logger.info(`Health check available at http://${host}:${actualPort}/health`);
       logger.info(
         `Authentication mode: ${isGatewayMode ? "gateway (X-PMG-Username and X-PMG-Password headers)" : "env (PMG_USERNAME and PMG_PASSWORD environment variables)"}`,
@@ -306,7 +388,7 @@ async function main() {
   // Fail fast on bad configuration (before accepting any request).
   const baseUrl = getBaseUrl(); // throws if PMG_BASE_URL is invalid
   const tiers = [...getEnabledTiers()]; // throws on an unknown tier name
-  logger.info("Starting Driversnote MCP server", {
+  logger.info("Starting PMG MCP server", {
     transport: transportType,
     apiBaseUrl: baseUrl,
     enabledTiers: tiers,
@@ -318,7 +400,7 @@ async function main() {
   if (transportType === "http") {
     const httpServer = await startHttpTransport();
     const shutdown = async () => {
-      logger.info("Shutting down Driversnote MCP server...");
+      logger.info("Shutting down PMG MCP server...");
       await new Promise<void>((resolve, reject) => {
         httpServer.close((err) => (err ? reject(err) : resolve()));
       });
@@ -327,11 +409,9 @@ async function main() {
     process.on("SIGINT", shutdown);
     process.on("SIGTERM", shutdown);
   } else {
-    if (!getCredentials()) {
-      const credentials = getCredentials();
-      if ("error" in credentials) {
-        logger.warn(`AUTH_MODE=env but PMG credentials are not set: ${credentials.error}`);
-      }
+    const credentials = getCredentials();
+    if ("error" in credentials) {
+      logger.warn(`PMG credentials are not set: ${credentials.error}`);
     }
     await startStdioTransport();
   }

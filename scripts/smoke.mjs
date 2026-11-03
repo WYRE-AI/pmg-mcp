@@ -87,7 +87,7 @@ try {
   });
 
   console.log("\n[3] HTTP gateway mode: header credentials reach the upstream");
-  const s2sSecret = "fake-smoke-s2s-secret-123";
+  const s2sSecret = "fake-smoke-s2s-secret-0123456789-abcdef";
   const child = spawn(process.execPath, [resolve(root, "dist/index.js")], {
     env: {
       ...getDefaultEnvironment(), PMG_BASE_URL: mockUrl, MCP_TRANSPORT: "http", AUTH_MODE: "gateway",

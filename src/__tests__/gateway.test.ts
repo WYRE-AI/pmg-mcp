@@ -27,7 +27,7 @@ function post(port: number, headers: Record<string, string>, body: unknown): Pro
   });
 }
 
-const SECRET = "fake-test-secret-value-123";
+const SECRET = "fake-test-secret-value-0123456789-abcdef";
 function sign(): string {
   const t = Math.floor(Date.now() / 1000);
   return `t=${t},v1=${createHmac("sha256", SECRET).update(`t=${t}`).digest("hex")}`;

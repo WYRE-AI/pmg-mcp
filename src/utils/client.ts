@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { Agent } from "undici";
 import type { ApiResult, EndpointSpec, PmgCredentials } from "./types.js";
@@ -23,15 +24,53 @@ interface TicketResult {
 }
 
 // Tickets are cached per (baseUrl, username, password) so one gateway user's
-// ticket is never used for another user.
+// ticket is never used for another user. The key is a SHA-256 digest of the
+// credential tuple so the plaintext password is never held as a Map key.
+// The cache is an LRU (Map insertion order) capped at MAX_TICKET_CACHE entries.
+export const MAX_TICKET_CACHE = 100;
+export const UPSTREAM_TIMEOUT_MS = 30_000;
 const ticketCache = new Map<string, Ticket>();
 
 function cacheKey(creds: PmgCredentials): string {
-  return JSON.stringify([creds.baseUrl, creds.username, creds.password]);
+  return createHash("sha256").update(JSON.stringify([creds.baseUrl, creds.username, creds.password])).digest("hex");
+}
+
+function sweepExpired(now = Date.now()): void {
+  for (const [key, ticket] of ticketCache) {
+    if (ticket.expiresAt <= now) ticketCache.delete(key);
+  }
+}
+
+function cacheGet(key: string): Ticket | undefined {
+  const ticket = ticketCache.get(key);
+  if (!ticket) return undefined;
+  if (Date.now() >= ticket.expiresAt) {
+    ticketCache.delete(key);
+    return undefined;
+  }
+  // Refresh recency.
+  ticketCache.delete(key);
+  ticketCache.set(key, ticket);
+  return ticket;
+}
+
+function cacheSet(key: string, ticket: Ticket): void {
+  sweepExpired();
+  ticketCache.delete(key);
+  ticketCache.set(key, ticket);
+  while (ticketCache.size > MAX_TICKET_CACHE) {
+    const oldest = ticketCache.keys().next().value;
+    if (oldest === undefined) break;
+    ticketCache.delete(oldest);
+  }
 }
 
 export function clearTicketCache(): void {
   ticketCache.clear();
+}
+
+export function ticketCacheSize(): number {
+  return ticketCache.size;
 }
 
 export function resolveBaseUrl(raw?: string): string {
@@ -95,21 +134,28 @@ function errorResult(kind: NonNullable<ApiResult["error"]>["kind"], message: str
 
 export async function getTicket(creds: PmgCredentials): Promise<TicketResult> {
   const key = cacheKey(creds);
-  const cached = ticketCache.get(key);
-  if (cached && Date.now() < cached.expiresAt) {
+  const cached = cacheGet(key);
+  if (cached) {
     return { ok: true, ticket: cached };
   }
 
-  const response = await fetch(`${creds.baseUrl}${TICKET_PATH}`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams({ username: creds.username, password: creds.password }).toString(),
-    redirect: "manual",
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${creds.baseUrl}${TICKET_PATH}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ username: creds.username, password: creds.password }).toString(),
+      redirect: "manual",
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+      dispatcher: getAgent() as never,
+    } as RequestInit);
+  } catch (error) {
+    return { ok: false, error: networkMessage(error, [creds.username, creds.password]) };
+  }
 
-  if (response.status >= 400) {
+  if (response.status >= 300) {
     ticketCache.delete(key);
     const message = redactSecrets(`Unable to authenticate to PMG (status ${response.status}).`, [
       creds.username,
@@ -118,12 +164,16 @@ export async function getTicket(creds: PmgCredentials): Promise<TicketResult> {
     return { ok: false, error: message };
   }
 
-  const body = (await response.json()) as {
-    data?: { ticket?: string; CSRFPreventionToken?: string; username?: string };
-  };
-  const ticket = body.data?.ticket;
-  const csrf = body.data?.CSRFPreventionToken;
-  const username = body.data?.username;
+  let body: { data?: { ticket?: string; CSRFPreventionToken?: string; username?: string } };
+  try {
+    body = (await response.json()) as typeof body;
+  } catch {
+    ticketCache.delete(key);
+    return { ok: false, error: "Invalid PMG ticket response: body is not valid JSON." };
+  }
+  const ticket = body?.data?.ticket;
+  const csrf = body?.data?.CSRFPreventionToken;
+  const username = body?.data?.username;
   if (!ticket || !csrf) {
     ticketCache.delete(key);
     return { ok: false, error: "Invalid PMG ticket response." };
@@ -135,31 +185,61 @@ export async function getTicket(creds: PmgCredentials): Promise<TicketResult> {
     username: username ?? creds.username,
     expiresAt: Date.now() + TICKET_TTL_MS,
   };
-  ticketCache.set(key, nextTicket);
+  cacheSet(key, nextTicket);
   return { ok: true, ticket: nextTicket };
 }
+
+function networkMessage(error: unknown, secrets: string[]): string {
+  const name = error instanceof Error ? error.name : "";
+  if (name === "TimeoutError" || name === "AbortError") {
+    return `PMG request timed out after ${UPSTREAM_TIMEOUT_MS / 1000}s.`;
+  }
+  const detail = error instanceof Error ? error.message : String(error);
+  return redactSecrets(`PMG request failed: ${detail}`, secrets);
+}
+
+// One undici Agent per CA file path; the file is read once per path.
+const agentCache = new Map<string, Agent>();
 
 function getAgent(): Agent | undefined {
   const certPath = process.env.PMG_CA_CERT_FILE;
   if (!certPath) return undefined;
-  const ca = readFileSync(certPath, "utf8");
-  return new Agent({ connect: { ca } });
-}
-
-function requiredPathParams(endpoint: EndpointSpec, args: Record<string, unknown>): string[] {
-  const names = Object.keys(endpoint.params).filter((key) => endpoint.path.includes(`{${key}}`));
-  return names.filter((key) => args[key] !== undefined && args[key] !== null);
-}
-
-function buildUrl(endpoint: EndpointSpec, args: Record<string, unknown>, creds: PmgCredentials): URL {
-  const url = new URL(`${creds.baseUrl}${API_PREFIX}${endpoint.path}`);
-  for (const key of Object.keys(endpoint.params)) {
-    if (!endpoint.path.includes(`{${key}}`)) continue;
-    const value = args[key];
-    if (value === undefined || value === null) continue;
-    url.pathname = url.pathname.replace(`{${key}}`, encodeURIComponent(String(value)));
+  let agent = agentCache.get(certPath);
+  if (!agent) {
+    agent = new Agent({ connect: { ca: readFileSync(certPath, "utf8") } });
+    agentCache.set(certPath, agent);
   }
-  return url;
+  return agent;
+}
+
+const STRICT_CIDR_RE = /^[0-9a-fA-F:.]+\/\d{1,3}$/;
+
+function pathParamNames(endpoint: EndpointSpec): string[] {
+  return [...endpoint.path.matchAll(/\{([^}]+)\}/g)].map((m) => m[1]);
+}
+
+/**
+ * Substitute `{param}` placeholders on the RAW path template, before any URL
+ * is constructed (new URL() would percent-encode the braces and break the
+ * match). Throws on a missing/unsafe value.
+ */
+export function buildPath(endpoint: EndpointSpec, args: Record<string, unknown>): string {
+  return endpoint.path.replace(/\{([^}]+)\}/g, (_m, name: string) => {
+    const raw = args[name];
+    if (raw === undefined || raw === null) {
+      throw new Error(`Missing required path parameter "${name}".`);
+    }
+    const value = String(raw);
+    if (value.trim() === "" || value === "." || value === "..") {
+      throw new Error(`Invalid value for path parameter "${name}": must not be empty, "." or "..".`);
+    }
+    // A "/" would add path segments. The only legitimate case is a CIDR
+    // (e.g. mynetworks 192.168.0.0/24), which is sent percent-encoded.
+    if (value.includes("/") && !(name === "cidr" && STRICT_CIDR_RE.test(value))) {
+      throw new Error(`Invalid value for path parameter "${name}": must not contain "/".`);
+    }
+    return encodeURIComponent(value);
+  });
 }
 
 export async function execute(
@@ -167,54 +247,58 @@ export async function execute(
   args: Record<string, unknown>,
   creds: PmgCredentials,
 ): Promise<ApiResult> {
-  const ticketResult = await getTicket(creds);
-  if (!ticketResult.ok || !ticketResult.ticket) {
-    return errorResult("auth", ticketResult.error ?? "Unable to authenticate to PMG.");
+  let path: string;
+  try {
+    path = buildPath(endpoint, args);
+  } catch (error) {
+    return errorResult("config", error instanceof Error ? error.message : String(error));
   }
-  const ticket = ticketResult.ticket;
-
-  const url = buildUrl(endpoint, args, creds);
-  const pathParams = new Set(requiredPathParams(endpoint, args));
-  const query = new URLSearchParams();
+  const pathParams = new Set(pathParamNames(endpoint));
+  // Forward only declared, non-path params; undeclared arguments are dropped.
+  const fields = new URLSearchParams();
   for (const [key, value] of Object.entries(args)) {
-    if (pathParams.has(key) || value === undefined || value === null) continue;
-    if (endpoint.method === "GET" || endpoint.method === "DELETE") {
-      query.set(key, String(value));
-    }
+    if (pathParams.has(key) || !Object.hasOwn(endpoint.params, key)) continue;
+    if (value === undefined || value === null) continue;
+    fields.set(key, String(value));
   }
-  const finalUrl = query.size > 0 ? `${url.toString()}${url.search ? "&" : "?"}${query.toString()}` : url.toString();
+  const hasBody = endpoint.method === "POST" || endpoint.method === "PUT";
+  const base = `${creds.baseUrl}${API_PREFIX}${path}`;
+  const finalUrl = !hasBody && fields.size > 0 ? `${base}?${fields.toString()}` : base;
+  const body = hasBody ? fields.toString() : undefined;
 
-  const secrets = [creds.username, creds.password, ticket.ticket, ticket.csrf];
-  const headers: Record<string, string> = {
-    cookie: `${AUTH_COOKIE}=${ticket.ticket}`,
-  };
-  if (endpoint.method !== "GET") {
-    headers[CSRF_HEADER] = ticket.csrf;
-  }
-  let body: string | undefined;
-  if (endpoint.method === "POST" || endpoint.method === "PUT") {
-    const form = new URLSearchParams();
-    for (const [key, value] of Object.entries(args)) {
-      if (pathParams.has(key) || value === undefined || value === null) continue;
-      form.set(key, String(value));
+  // At most ONE re-auth retry per call.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const ticketResult = await getTicket(creds);
+    if (!ticketResult.ok || !ticketResult.ticket) {
+      return errorResult("auth", ticketResult.error ?? "Unable to authenticate to PMG.");
     }
-    body = form.toString();
-    headers["content-type"] = "application/x-www-form-urlencoded";
-  }
+    const ticket = ticketResult.ticket;
+    const secrets = [creds.username, creds.password, ticket.ticket, ticket.csrf];
+    const headers: Record<string, string> = {
+      cookie: `${AUTH_COOKIE}=${ticket.ticket}`,
+    };
+    if (endpoint.method !== "GET") {
+      headers[CSRF_HEADER] = ticket.csrf;
+    }
+    if (hasBody) headers["content-type"] = "application/x-www-form-urlencoded";
 
-  const retryState: { retried: boolean } = { retried: false };
-  while (true) {
-    const response = await fetch(finalUrl, {
-      method: endpoint.method,
-      headers,
-      body,
-      redirect: "manual",
-      dispatcher: getAgent() as never,
-    });
-    if (response.status === 401 && !retryState.retried) {
-      retryState.retried = true;
+    let response: Response;
+    try {
+      response = await fetch(finalUrl, {
+        method: endpoint.method,
+        headers,
+        body,
+        redirect: "manual",
+        signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+        dispatcher: getAgent() as never,
+      } as RequestInit);
+    } catch (error) {
+      return errorResult("network", networkMessage(error, secrets));
+    }
+    if (response.status === 401) {
       ticketCache.delete(cacheKey(creds));
-      return execute(endpoint, args, creds);
+      if (attempt === 0) continue;
+      return errorResult("auth", "PMG rejected the request as unauthorized (401) after re-authenticating.");
     }
     if (response.status >= 300 && response.status < 400) {
       return errorResult("http", `PMG returned an unexpected redirect status ${response.status}.`);
@@ -237,4 +321,5 @@ export async function execute(
     }
     return { ok: true, data };
   }
+  return errorResult("auth", "Unable to authenticate to PMG.");
 }
