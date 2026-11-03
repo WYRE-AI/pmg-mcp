@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  packages: read  # required by the reusable mcp-assert workflow
 
 jobs:
   assert:
