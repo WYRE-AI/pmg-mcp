@@ -1,0 +1,52 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.WYRE-AI/pmg-mcp",
+  "title": "Proxmox Mail Gateway",
+  "description": "MCP server for the Proxmox Mail Gateway REST API.",
+  "repository": {
+    "url": "https://github.com/WYRE-AI/pmg-mcp",
+    "source": "https://github.com/WYRE-AI/pmg-mcp"
+  },
+  "version": "0.0.0",
+  "websiteUrl": "https://github.com/WYRE-AI/pmg-mcp",
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/wyre-ai/pmg-mcp:0.0.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "MCP_TRANSPORT",
+          "value": "stdio"
+        },
+        {
+          "name": "AUTH_MODE",
+          "value": "env"
+        },
+        {
+          "name": "PMG_BASE_URL",
+          "description": "Proxmox Mail Gateway API base URL",
+          "isRequired": true,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "PMG_USERNAME",
+          "description": "Proxmox Mail Gateway username",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "PMG_PASSWORD",
+          "description": "Proxmox Mail Gateway password",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}

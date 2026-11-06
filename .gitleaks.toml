@@ -1,0 +1,10 @@
+# Extend the default gitleaks rules. Only the specific, obviously fake fixture
+# values below are allowlisted (no path-wide allowlist), so a real secret added
+# anywhere, including tests and the smoke script, is still reported.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fake PMG fixture passwords used only in mocked tests and the smoke script"
+regexTarget = "secret"
+regexes = ['''^(mock-password|fake-password|hdr-fake-password|env-fake-password)$''']
