@@ -18,6 +18,14 @@
       },
       "environmentVariables": [
         {
+          "name": "MCP_TRANSPORT",
+          "value": "stdio"
+        },
+        {
+          "name": "AUTH_MODE",
+          "value": "env"
+        },
+        {
           "name": "PMG_BASE_URL",
           "description": "Proxmox Mail Gateway API base URL",
           "isRequired": true,

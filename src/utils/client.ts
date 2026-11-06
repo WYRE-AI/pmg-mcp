@@ -315,13 +315,13 @@ export async function execute(
       data = { message: redactSecrets(responseText, secrets) };
     }
     if (!response.ok) {
-      const message = redactSecrets(
+      const detail = redactSecrets(
         typeof data === "object" && data !== null && "message" in data
           ? String((data as { message?: unknown }).message)
           : JSON.stringify(data ?? {}),
         secrets,
       );
-      return errorResult("upstream", message);
+      return errorResult("upstream", `PMG returned status ${response.status}: ${detail}`);
     }
     return { ok: true, data };
   }

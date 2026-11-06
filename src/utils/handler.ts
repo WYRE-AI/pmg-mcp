@@ -19,7 +19,7 @@ function toTool(endpoint: EndpointSpec) {
   return {
     name: endpoint.tool,
     description:
-      endpoint.destructive === true
+      endpoint.destructive === true && !endpoint.description.startsWith("⚠ DESTRUCTIVE")
         ? `⚠ DESTRUCTIVE ${endpoint.description}`
         : endpoint.description,
     inputSchema: {
